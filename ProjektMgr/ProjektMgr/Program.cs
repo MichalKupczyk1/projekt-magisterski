@@ -4,7 +4,8 @@
     {
         static void Main(string[] args)
         {
-            Console.WriteLine("Hello, World!");
+            BitmapUtils.LoadBitmapFromFile(@"C:\Users\Michal\Desktop\projekt github\projekt-magisterski\kot.bmp");
+            Console.WriteLine(BitmapUtils.Height + " " + BitmapUtils.Width);
         }
     }
 }
