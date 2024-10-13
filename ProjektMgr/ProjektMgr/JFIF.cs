@@ -1,8 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using System.Diagnostics;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace ProjektMgr
 {
@@ -11,27 +8,61 @@ namespace ProjektMgr
     {
         //domyslnie 8x8, wedlug standardu jfif
         private static int blockSize = 8;
-        public static RGBPixel[,] Pixels { get; set; }
-        public static void LoadAllPixels(byte[] bytes, long width, long height, int padding)
+        public static void CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
-            var oneDimArray = CreateOneDimRGBPixelArray(bytes, width, height, padding);
-            var YCbCrArray = CreateTwoDimYCbCrPixelArray(oneDimArray, width, height);
-            var downsampledArray = ApplyDownsampling(YCbCrArray, width, height);
+            var downsampledArray = GenerateDownsampledArray(bytes, width, height, padding);
+            var encodedData = ReturnHuffmanEncodedData(downsampledArray);
+            var totalLenght = encodedData.Y.Length + encodedData.Cb.Length + encodedData.Cr.Length;
+            Console.WriteLine("Total length: " + (totalLenght / 1048576.0).ToString("F2") + "mb");
+        }
+
+        private static (string Y, string Cr, string Cb) ReturnHuffmanEncodedData((float[,] Y, float[,] Cb, float[,] Cr) downsampledArray)
+        {
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
             var Y = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Y));
             var Cr = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cr));
             var Cb = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cb));
 
-            var YDCT = ApplyDCTToBlock(Y)
-                .Select(x => QuantizeYBlock(x))
-                .ToList();
+            var YDCT = ReturnQuantizedBlock(Y, true);
+            var CrDCT = ReturnQuantizedBlock(Cr);
+            var CbDCT = ReturnQuantizedBlock(Cb);
 
-            var CrDCT = ApplyDCTToBlock(Cr)
-                .Select(x => QuantizeCbCrBlock(x))
-                .ToList();
+            var zigZagY = EncodeAllBlocks(YDCT);
+            var YFrequency = GenerateFrequencyDictionary(zigZagY);
+            var zigZagCb = EncodeAllBlocks(CbDCT);
+            var CbFrequency = GenerateFrequencyDictionary(zigZagCb);
+            var zigZagCr = EncodeAllBlocks(CrDCT);
+            var CrFrequency = GenerateFrequencyDictionary(zigZagCr);
+            sw.Stop();
+            Console.WriteLine("Total: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
 
-            var CbDCT = ApplyDCTToBlock(Cb)
-                .Select(x => QuantizeCbCrBlock(x))
-                .ToList();
+            return ("", "", "");
+        }
+
+        private static List<float[,]> ReturnQuantizedBlock(float[,] block, bool isY = false)
+        {
+            var res = new List<float[,]>();
+            var dcts = ApplyDCTToBlock(block);
+
+            foreach (var dct in dcts)
+                res.Add(isY ? QuantizeYBlock(dct) : QuantizeCbCrBlock(dct));
+            return res;
+        }
+
+        private static (float[,] Y, float[,] Cb, float[,] Cr) GenerateDownsampledArray(byte[] bytes, long width, long height, int padding)
+        {
+            var oneDimArray = CreateOneDimRGBPixelArray(bytes, width, height, padding);
+            var YCbCrArray = CreateTwoDimYCbCrPixelArray(oneDimArray, width, height);
+            return ApplyDownsampling(YCbCrArray, width, height);
+        }
+
+        private static string GenerateHuffmanEncodedDataString(List<float[,]> blocks)
+        {
+            var zigZagData = EncodeAllBlocks(blocks);
+            var frequency = GenerateFrequencyDictionary(zigZagData);
+
+            return "";
         }
 
         private static RGBPixel[] CreateOneDimRGBPixelArray(byte[] bytes, long width, long height, int padding)
@@ -60,7 +91,7 @@ namespace ProjektMgr
 
         private static YCbCr[,] CreateTwoDimYCbCrPixelArray(RGBPixel[] pixels, long width, long height)
         {
-            var twoDimArray = new YCbCr[width, height];
+            var twoDimArray = new YCbCr[height, width];
             var count = 0;
 
             for (int i = 0; i < height; i++)
@@ -172,20 +203,17 @@ namespace ProjektMgr
             int height = array.GetLength(1);
             var res = new List<float[,]>();
 
-            for (int i = 0; i < height; i += blockSize)
+            for (int i = 0; i < width; i += blockSize)
             {
-                for (int j = 0; j < width; j += blockSize)
+                for (int j = 0; j < height; j += blockSize)
                 {
                     var block = new float[blockSize, blockSize];
                     for (int x = 0; x < blockSize; x++)
                     {
                         for (int y = 0; y < blockSize; y++)
-                        {
                             block[x, y] = array[i + x, j + y];
-                        }
                     }
-                    var dct = CalculateDCT(block);
-                    res.Add(dct);
+                    res.Add(CalculateDCT(block));
                 }
             }
             return res;
@@ -225,6 +253,35 @@ namespace ProjektMgr
                 int y = CalculationArrays.ZigZagScan[i] % 8;
                 res[i] = (int)block[x, y];
             }
+
+            return res;
+        }
+
+        private static int[] EncodeAllBlocks(List<float[,]> blocks)
+        {
+            var res = new int[8 * 8 * blocks.Count()];
+            var stopPoint = 0;
+
+            foreach (var block in blocks)
+            {
+                var blockToAdd = ZigZagScan(block);
+                foreach (var value in blockToAdd)
+                {
+                    res[stopPoint++] = value;
+                }
+            }
+            return res;
+        }
+
+        private static Dictionary<int, int> GenerateFrequencyDictionary(int[] scannedData)
+        {
+            var res = new Dictionary<int, int>();
+            var groups = scannedData.GroupBy(x => x)
+                .OrderByDescending(x => x.Count())
+                .ToList();
+
+            foreach (var group in groups)
+                res.Add(group.First(), group.Count());
 
             return res;
         }
