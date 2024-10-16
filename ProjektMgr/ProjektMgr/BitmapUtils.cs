@@ -6,23 +6,30 @@
         public static long Width { get; set; }
         public static long Height { get; set; }
         public static int Padding { get; set; }
-        public static byte[] Bytes { get; set; } = new byte[0];
-        //private fields for calculations
+        public static byte[] HeaderInfoBytes { get; set; } = new byte[0];
+        public static byte[] PixelBytes { get; set; } = new byte[0];
 
         public static void LoadBitmapFromFile(string filePath)
         {
             if (File.Exists(filePath))
             {
-                Bytes = File.ReadAllBytes(filePath);
-                if (Bytes != null && Bytes.Length > 0)
-                    CalculateWidthHeightAndPadding();
+                var bytes = File.ReadAllBytes(filePath);
+                if (bytes != null && bytes.Length > 0)
+                {
+                    CalculateWidthHeightAndPadding(bytes);
+
+                    HeaderInfoBytes = new byte[54];
+                    Array.Copy(bytes, 0, HeaderInfoBytes, 0, HeaderInfoBytes.Length);
+                    PixelBytes = new byte[bytes.Length - 54];
+                    Array.Copy(bytes, 54, PixelBytes, 0, PixelBytes.Length);
+                }
             }
         }
 
-        private static void CalculateWidthHeightAndPadding()
+        private static void CalculateWidthHeightAndPadding(byte[] pixels)
         {
-            Width = (long)((int)Bytes[18] + (256 * (int)Bytes[19]) + ((Math.Pow(256, 2) * (int)Bytes[20])) + (Math.Pow(256, 3) * (int)Bytes[21]));
-            Height = (long)((int)Bytes[22] + (256 * (int)Bytes[23]) + ((Math.Pow(256, 2) * (int)Bytes[24])) + (Math.Pow(256, 3) * (int)Bytes[25]));
+            Width = (long)((int)pixels[18] + (256 * (int)pixels[19]) + ((Math.Pow(256, 2) * (int)pixels[20])) + (Math.Pow(256, 3) * (int)pixels[21]));
+            Height = (long)((int)pixels[22] + (256 * (int)pixels[23]) + ((Math.Pow(256, 2) * (int)pixels[24])) + (Math.Pow(256, 3) * (int)pixels[25]));
             Padding = (Width % 4 != 0) ? (short)(4 - (Width % 4)) : 0;
         }
     }

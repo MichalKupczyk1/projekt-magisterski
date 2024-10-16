@@ -4,8 +4,8 @@
     {
         static void Main(string[] args)
         {
-            BitmapUtils.LoadBitmapFromFile(@"kot.bmp");
-            JFIF.CreateJFIFFile(BitmapUtils.Bytes, BitmapUtils.Width, BitmapUtils.Height, BitmapUtils.Padding);
+            BitmapUtils.LoadBitmapFromFile(@"C:\Users\Michal\Desktop\projekt github\projekt-magisterski\kot.bmp");
+            JFIF.CreateJFIFFile(BitmapUtils.PixelBytes, BitmapUtils.Width, BitmapUtils.Height, BitmapUtils.Padding);
         }
     }
 }

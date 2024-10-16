@@ -28,23 +28,16 @@ namespace ProjektMgr
             var CrDCT = ReturnQuantizedBlock(Cr);
             var CbDCT = ReturnQuantizedBlock(Cb);
 
-            var zigZagY = EncodeAllBlocks(YDCT);
-            var YFrequency = GenerateFrequencyDictionary(zigZagY);
-            var zigZagCb = EncodeAllBlocks(CbDCT);
-            var CbFrequency = GenerateFrequencyDictionary(zigZagCb);
-            var zigZagCr = EncodeAllBlocks(CrDCT);
-            var CrFrequency = GenerateFrequencyDictionary(zigZagCr);
-            sw.Stop();
+            var res = (GenerateHuffmanEncodedDataString(YDCT), GenerateHuffmanEncodedDataString(CrDCT), GenerateHuffmanEncodedDataString(CbDCT));
             Console.WriteLine("Total: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
 
-            return ("", "", "");
+            return res;
         }
 
         private static List<float[,]> ReturnQuantizedBlock(float[,] block, bool isY = false)
         {
             var res = new List<float[,]>();
             var dcts = ApplyDCTToBlock(block);
-
             foreach (var dct in dcts)
                 res.Add(isY ? QuantizeYBlock(dct) : QuantizeCbCrBlock(dct));
             return res;
@@ -61,8 +54,20 @@ namespace ProjektMgr
         {
             var zigZagData = EncodeAllBlocks(blocks);
             var frequency = GenerateFrequencyDictionary(zigZagData);
+            var priorityQueue = HuffmanCoding.BuildPriorityQueue(frequency);
+            var tree = HuffmanCoding.BuildHuffmanTree(priorityQueue);
+            var huffmanDictionary = HuffmanCoding.GenerateHuffmanCodes(tree);
+            return ReturnEncodedString(huffmanDictionary, zigZagData);
+        }
 
-            return "";
+        private static string ReturnEncodedString(Dictionary<int, string> huffmanCodes, int[] dataToEncode)
+        {
+            var res = new List<string>();
+
+            foreach (var value in dataToEncode)
+                res.Add(huffmanCodes[value]);
+
+            return String.Join("", res);
         }
 
         private static RGBPixel[] CreateOneDimRGBPixelArray(byte[] bytes, long width, long height, int padding)
@@ -72,7 +77,7 @@ namespace ProjektMgr
             var i = 0;
             var counter = 0;
 
-            for (i = 0; i < bytes.Length - 54;)
+            for (i = 0; i < bytes.Length - 1;)
             {
                 if (padding != 0 && counter != 0 && (counter / 3) % width == 0)
                 {
@@ -80,7 +85,7 @@ namespace ProjektMgr
                     counter = 0;
                     continue;
                 }
-                pixelsOneDim[z++] = new RGBPixel(bytes[i + 54], bytes[i + 55], bytes[i + 56]);
+                pixelsOneDim[z++] = new RGBPixel(bytes[i], bytes[i + 1], bytes[i + 2]);
                 i += 3;
 
                 if (padding != 0)
@@ -98,8 +103,9 @@ namespace ProjektMgr
             {
                 for (int j = 0; j < width; j++)
                 {
-                    var pixel = pixels[count++];
+                    var pixel = pixels[count];
                     twoDimArray[i, j] = new YCbCr(pixel.R, pixel.G, pixel.B);
+                    count++;
                 }
             }
             return twoDimArray;
@@ -160,9 +166,9 @@ namespace ProjektMgr
 
         private static float[,] CalculateDCT(float[,] block)
         {
-            var width = block.GetLength(0);
-            var height = block.GetLength(1);
-            var result = new float[width, height];
+            var height = block.GetLength(0);
+            var width = block.GetLength(1);
+            var result = new float[height, width];
 
             for (int u = 0; u < blockSize; u++)
             {
@@ -184,36 +190,36 @@ namespace ProjektMgr
 
         public static float[,] ShiftValuesInArray(float[,] array)
         {
-            var width = array.GetLength(0);
-            var height = array.GetLength(1);
+            var height = array.GetLength(0);
+            var width = array.GetLength(1);
 
-            for (int i = 0; i < width; i++)
-            {
-                for (int j = 0; j < height; j++)
-                {
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
                     array[i, j] -= 128;
-                }
-            }
+
             return array;
         }
 
         private static List<float[,]> ApplyDCTToBlock(float[,] array)
         {
-            int width = array.GetLength(0);
-            int height = array.GetLength(1);
+            var height = array.GetLength(0);
+            var width = array.GetLength(1);
             var res = new List<float[,]>();
 
-            for (int i = 0; i < width; i += blockSize)
+            for (int i = 0; i < height; i += blockSize)
             {
-                for (int j = 0; j < height; j += blockSize)
+                for (int j = 0; j < width; j += blockSize)
                 {
                     var block = new float[blockSize, blockSize];
                     for (int x = 0; x < blockSize; x++)
                     {
                         for (int y = 0; y < blockSize; y++)
+                        {
                             block[x, y] = array[i + x, j + y];
+                        }
                     }
-                    res.Add(CalculateDCT(block));
+                    var dct = CalculateDCT(block);
+                    res.Add(dct);
                 }
             }
             return res;
@@ -224,10 +230,9 @@ namespace ProjektMgr
             var res = new float[blockSize, blockSize];
 
             for (int i = 0; i < blockSize; i++)
-            {
                 for (int j = 0; j < blockSize; j++)
                     res[i, j] = (float)Math.Round(block[i, j] / CalculationArrays.QuantizationYTable[i, j]);
-            }
+
             return res;
         }
 
@@ -236,10 +241,9 @@ namespace ProjektMgr
             var res = new float[blockSize, blockSize];
 
             for (int i = 0; i < blockSize; i++)
-            {
                 for (int j = 0; j < blockSize; j++)
                     res[i, j] = (float)Math.Round(block[i, j] / CalculationArrays.QuantizationCbCrTable[i, j]);
-            }
+
             return res;
         }
 
@@ -261,14 +265,11 @@ namespace ProjektMgr
         {
             var res = new int[8 * 8 * blocks.Count()];
             var stopPoint = 0;
-
             foreach (var block in blocks)
             {
                 var blockToAdd = ZigZagScan(block);
                 foreach (var value in blockToAdd)
-                {
                     res[stopPoint++] = value;
-                }
             }
             return res;
         }
@@ -277,7 +278,7 @@ namespace ProjektMgr
         {
             var res = new Dictionary<int, int>();
             var groups = scannedData.GroupBy(x => x)
-                .OrderByDescending(x => x.Count())
+                .OrderBy(x => x.Count())
                 .ToList();
 
             foreach (var group in groups)
