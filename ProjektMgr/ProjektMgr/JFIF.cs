@@ -10,16 +10,30 @@ namespace ProjektMgr
         private static int blockSize = 8;
         public static void CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
-            var downsampledArray = GenerateDownsampledArray(bytes, width, height, padding);
-            var encodedData = ReturnHuffmanEncodedData(downsampledArray);
-            var totalLenght = encodedData.Y.Length + encodedData.Cb.Length + encodedData.Cr.Length;
-            Console.WriteLine("Total length: " + (totalLenght / 1048576.0).ToString("F2") + "mb");
+            Console.WriteLine("File size before encoding: " + (bytes.Length / 1048576.0).ToString("F2") + "mb");
+            //encoding
+            var encodedData = EncodeData(bytes, width, height, padding);
+            //decoding
+            var decodedData = DecodeData(encodedData.Y, encodedData.Cr, encodedData.Cb, width, height);
         }
 
-        private static (string Y, string Cr, string Cb) ReturnHuffmanEncodedData((float[,] Y, float[,] Cb, float[,] Cr) downsampledArray)
+        private static (string Y, string Cr, string Cb) EncodeData(byte[] bytes, long width, long height, int padding)
         {
             Stopwatch sw = new Stopwatch();
             sw.Start();
+            var downsampledArray = GenerateDownsampledArray(bytes, width, height, padding);
+            var encodedData = ReturnHuffmanEncodedData(downsampledArray);
+            Console.WriteLine("Total encoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
+
+            var totalLenght = encodedData.Y.Length + encodedData.Cb.Length + encodedData.Cr.Length;
+            Console.WriteLine("File size after encoding: " + (totalLenght / 1048576.0).ToString("F2") + "mb");
+
+            return encodedData;
+        }
+
+        #region encoding
+        private static (string Y, string Cr, string Cb) ReturnHuffmanEncodedData((float[,] Y, float[,] Cb, float[,] Cr) downsampledArray)
+        {
             var Y = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Y));
             var Cr = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cr));
             var Cb = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cb));
@@ -28,8 +42,7 @@ namespace ProjektMgr
             var CrDCT = ReturnQuantizedBlock(Cr);
             var CbDCT = ReturnQuantizedBlock(Cb);
 
-            var res = (GenerateHuffmanEncodedDataString(YDCT), GenerateHuffmanEncodedDataString(CrDCT), GenerateHuffmanEncodedDataString(CbDCT));
-            Console.WriteLine("Total: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
+            var res = (GenerateHuffmanEncodedDataString(YDCT, isY: true), GenerateHuffmanEncodedDataString(CrDCT, isCr: true), GenerateHuffmanEncodedDataString(CbDCT, isCb: true));
 
             return res;
         }
@@ -50,13 +63,21 @@ namespace ProjektMgr
             return ApplyDownsampling(YCbCrArray, width, height);
         }
 
-        private static string GenerateHuffmanEncodedDataString(List<float[,]> blocks)
+        private static string GenerateHuffmanEncodedDataString(List<float[,]> blocks, bool isY = false, bool isCr = false, bool isCb = false)
         {
             var zigZagData = EncodeAllBlocks(blocks);
             var frequency = GenerateFrequencyDictionary(zigZagData);
             var priorityQueue = HuffmanCoding.BuildPriorityQueue(frequency);
             var tree = HuffmanCoding.BuildHuffmanTree(priorityQueue);
             var huffmanDictionary = HuffmanCoding.GenerateHuffmanCodes(tree);
+
+            if (isY)
+                HuffmanCoding.YDataDictionary = huffmanDictionary;
+            if (isCr)
+                HuffmanCoding.CrDataDictionary = huffmanDictionary;
+            if (isCb)
+                HuffmanCoding.CbDataDictionary = huffmanDictionary;
+
             return ReturnEncodedString(huffmanDictionary, zigZagData);
         }
 
@@ -214,12 +235,9 @@ namespace ProjektMgr
                     for (int x = 0; x < blockSize; x++)
                     {
                         for (int y = 0; y < blockSize; y++)
-                        {
                             block[x, y] = array[i + x, j + y];
-                        }
                     }
-                    var dct = CalculateDCT(block);
-                    res.Add(dct);
+                    res.Add(CalculateDCT(block));
                 }
             }
             return res;
@@ -286,6 +304,139 @@ namespace ProjektMgr
 
             return res;
         }
+        #endregion
+
+        #region decoding
+        private static byte[] DecodeData(string Y, string Cr, string Cb, long width, long height)
+        {
+            var decodedY = DecodeHuffmanData(Y, HuffmanCoding.YDataDictionary);
+            var decodedCr = DecodeHuffmanData(Cr, HuffmanCoding.CrDataDictionary);
+            var decodedCb = DecodeHuffmanData(Cb, HuffmanCoding.CbDataDictionary);
+
+            var blocksY = new List<float[,]>();
+            var blocksCb = new List<float[,]>();
+            var blocksCr = new List<float[,]>();
+
+            var decodedZigZagY = DecodeZigZagDataIntoBlocks(decodedY);
+            var decodedZigZagCb = DecodeZigZagDataIntoBlocks(decodedCr);
+            var decodedZigZagCr = DecodeZigZagDataIntoBlocks(decodedCb);
+
+            var dequantizedY = DequantizeBlocks(decodedZigZagY, true);
+            var dequantizedCr = DequantizeBlocks(decodedZigZagCr);
+            var dequantizedCb = DequantizeBlocks(decodedZigZagCb);
+
+            ////var rgbImage = ReconstructImageFromYCbCr(spatialY, spatialCr, spatialCb);
+
+            return new byte[1];
+        }
+
+        private static float[,] RestoreDownsampledData(float[,] array, long width, long height, bool isY = false)
+        {
+            return null;
+        }
+
+        private static float[,] CalculateIDCTAndReshiftValues(float[,] block)
+        {
+            var result = new float[blockSize, blockSize];
+
+            for (int x = 0; x < blockSize; x++)
+            {
+                for (int y = 0; y < blockSize; y++)
+                {
+                    float sum = 0.0f;
+                    for (int u = 0; u < blockSize; u++)
+                    {
+                        for (int v = 0; v < blockSize; v++)
+                        {
+                            float alphaU = (u == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
+                            float alphaV = (v == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
+
+                            sum += alphaU * alphaV * block[u, v] *
+                                   (float)Math.Cos(((2 * x + 1) * u * Math.PI) / (2 * blockSize)) *
+                                   (float)Math.Cos(((2 * y + 1) * v * Math.PI) / (2 * blockSize));
+                        }
+                    }
+                    result[x, y] = 0.25f * sum + 128;
+                }
+            }
+            return result;
+        }
+
+
+        private static List<float[,]> DequantizeBlocks(List<float[,]> blocks, bool isY = false)
+        {
+            for (int b = 0; b < blocks.Count(); b++)
+            {
+                var block = blocks.ElementAt(b);
+                for (int i = 0; i < blockSize; i++)
+                {
+                    for (int j = 0; j < blockSize; j++)
+                    {
+                        block[i, j] = isY ? block[i, j] * CalculationArrays.QuantizationYTable[i, j] : block[i, j] * CalculationArrays.QuantizationCbCrTable[i, j];
+                    }
+                    blocks.RemoveAt(b);
+                    blocks.Insert(b, CalculateIDCTAndReshiftValues(block));
+                }
+            }
+            return blocks;
+        }
+
+        private static List<float[,]> DecodeZigZagDataIntoBlocks(List<int> decodedData)
+        {
+            var res = new List<float[,]>();
+            var currentPos = 0;
+            var blockShift = 64;
+
+            while (currentPos < decodedData.Count())
+            {
+                var first64 = decodedData.GetRange(currentPos, blockShift).ToArray();
+                res.Add(CreateBlockFromZigZagData(first64));
+                currentPos += blockShift;
+            }
+            return res;
+        }
+
+        private static List<int> DecodeHuffmanData(string encodedData, Dictionary<int, string> dictionary)
+        {
+            var res = new List<int>();
+
+            var reverseDictionary = dictionary.ToDictionary(x => x.Value, x => x.Key);
+
+            var temp = "";
+            foreach (var character in encodedData)
+            {
+                temp += character;
+                if (reverseDictionary.ContainsKey(temp))
+                {
+                    res.Add(reverseDictionary[temp]);
+                    temp = "";
+                }
+            }
+
+            return res;
+        }
+
+        private static List<float[,]> DecodeFrequenciesIntoBlocks(List<int> frequencies)
+        {
+            var res = new List<float[,]>();
+
+            return res;
+        }
+
+        private static float[,] CreateBlockFromZigZagData(int[] zigZagData)
+        {
+            var res = new float[blockSize, blockSize];
+
+            for (int i = 0; i < blockSize * blockSize; i++)
+            {
+                int x = CalculationArrays.ZigZagScan[i] / 8;
+                int y = CalculationArrays.ZigZagScan[i] % 8;
+                res[x, y] = zigZagData[i];
+            }
+
+            return res;
+        }
+        #endregion
     }
 
     public static class CalculationArrays

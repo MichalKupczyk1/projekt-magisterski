@@ -8,6 +8,9 @@ namespace ProjektMgr
 {
     public static class HuffmanCoding
     {
+        public static Dictionary<int, string> YDataDictionary = new Dictionary<int, string>();
+        public static Dictionary<int, string> CbDataDictionary = new Dictionary<int, string>();
+        public static Dictionary<int, string> CrDataDictionary = new Dictionary<int, string>();
         public static List<HuffmanNode> BuildPriorityQueue(Dictionary<int, int> frequencies)
         {
             List<HuffmanNode> nodes = frequencies.Select(kvp => new HuffmanNode(kvp.Key, kvp.Value)).ToList();
