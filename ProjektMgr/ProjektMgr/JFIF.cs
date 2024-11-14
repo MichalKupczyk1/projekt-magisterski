@@ -8,6 +8,9 @@ namespace ProjektMgr
     {
         //domyslnie 8x8, wedlug standardu jfif
         private static int blockSize = 8;
+        private static int ExtendedWidth { get; set; }
+        private static int ExtendedHeight { get; set; }
+
         public static void CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
             Console.WriteLine("File size before encoding: " + (bytes.Length / 1048576.0).ToString("F2") + "mb");
@@ -165,11 +168,14 @@ namespace ProjektMgr
             if (rowsToAdd == 0 && colsToAdd == 0)
                 return array;
 
-            float[,] newArray = new float[originalRows + rowsToAdd, originalCols + colsToAdd];
+            ExtendedHeight = originalRows + rowsToAdd;
+            ExtendedWidth = originalCols + colsToAdd;
 
-            for (int i = 0; i < newArray.GetLength(0); i++)
+            float[,] newArray = new float[ExtendedHeight, ExtendedWidth];
+
+            for (int i = 0; i < ExtendedHeight; i++)
             {
-                for (int j = 0; j < newArray.GetLength(1); j++)
+                for (int j = 0; j < ExtendedWidth; j++)
                 {
                     if (i >= originalRows)
                         newArray[i, j] = array[originalRows - 1, Math.Min(j, originalCols - 1)];
@@ -309,51 +315,71 @@ namespace ProjektMgr
         #region decoding
         private static byte[] DecodeData(string Y, string Cr, string Cb, long width, long height)
         {
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
+
             var decodedY = DecodeHuffmanData(Y, HuffmanCoding.YDataDictionary);
             var decodedCr = DecodeHuffmanData(Cr, HuffmanCoding.CrDataDictionary);
             var decodedCb = DecodeHuffmanData(Cb, HuffmanCoding.CbDataDictionary);
-
-            var blocksY = new List<float[,]>();
-            var blocksCb = new List<float[,]>();
-            var blocksCr = new List<float[,]>();
 
             var decodedZigZagY = DecodeZigZagDataIntoBlocks(decodedY);
             var decodedZigZagCb = DecodeZigZagDataIntoBlocks(decodedCr);
             var decodedZigZagCr = DecodeZigZagDataIntoBlocks(decodedCb);
 
-            var dequantizedY = DequantizeBlocks(decodedZigZagY, true);
-            var dequantizedCr = DequantizeBlocks(decodedZigZagCr);
-            var dequantizedCb = DequantizeBlocks(decodedZigZagCb);
+            var dequantizedReshiftedY = DequantizeBlocks(decodedZigZagY, true);
+            var dequantizedReshiftedCr = DequantizeBlocks(decodedZigZagCr);
+            var dequantizedReshiftedCb = DequantizeBlocks(decodedZigZagCb);
+
+            var extendedY = Return2DArrayFromDequantizedList(dequantizedReshiftedY);
+            var extendedCb = Return2DArrayFromDequantizedList(dequantizedReshiftedCb);
+            var extendedCr = Return2DArrayFromDequantizedList(dequantizedReshiftedCr);
 
             ////var rgbImage = ReconstructImageFromYCbCr(spatialY, spatialCr, spatialCb);
-
+            Console.WriteLine("Decoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
             return new byte[1];
         }
 
-        private static float[,] RestoreDownsampledData(float[,] array, long width, long height, bool isY = false)
+        private static float[,] Return2DArrayFromDequantizedList(List<float[,]> dequantizedData)
         {
-            return null;
+            var res = new float[ExtendedHeight, ExtendedWidth];
+            var iter = 0;
+
+            for (int i = 0; i < ExtendedHeight; i += blockSize)
+            {
+                for (int j = 0; j < ExtendedWidth; j += blockSize)
+                    for (int x = 0; x < blockSize; x++)
+                        for (int y = 0; y < blockSize; y++)
+                            res[ExtendedHeight + x, ExtendedWidth + y] = dequantizedData.ElementAt(iter)[x, y];
+                iter++;
+            }
+            return res;
         }
 
         private static float[,] CalculateIDCTAndReshiftValues(float[,] block)
         {
+            var alfaU = (float)(1 / Math.Sqrt(2));
+            var alfaV = (float)(1 / Math.Sqrt(2));
+            var pi = Math.PI;
+            var blockSizeMultiplied = 2 * blockSize;
+
             var result = new float[blockSize, blockSize];
+            var sum = 0.0f;
 
             for (int x = 0; x < blockSize; x++)
             {
+                sum = 0.0f;
                 for (int y = 0; y < blockSize; y++)
                 {
-                    float sum = 0.0f;
                     for (int u = 0; u < blockSize; u++)
                     {
                         for (int v = 0; v < blockSize; v++)
                         {
-                            float alphaU = (u == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
-                            float alphaV = (v == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
+                            float alphaU = (u == 0) ? alfaU : 1.0f;
+                            float alphaV = (v == 0) ? alfaV : 1.0f;
 
                             sum += alphaU * alphaV * block[u, v] *
-                                   (float)Math.Cos(((2 * x + 1) * u * Math.PI) / (2 * blockSize)) *
-                                   (float)Math.Cos(((2 * y + 1) * v * Math.PI) / (2 * blockSize));
+                                   (float)Math.Cos(((2 * x + 1) * u * pi) / (blockSizeMultiplied)) *
+                                   (float)Math.Cos(((2 * y + 1) * v * pi) / (blockSizeMultiplied));
                         }
                     }
                     result[x, y] = 0.25f * sum + 128;
@@ -367,16 +393,13 @@ namespace ProjektMgr
         {
             for (int b = 0; b < blocks.Count(); b++)
             {
-                var block = blocks.ElementAt(b);
+                var block = blocks[b];
                 for (int i = 0; i < blockSize; i++)
                 {
                     for (int j = 0; j < blockSize; j++)
-                    {
                         block[i, j] = isY ? block[i, j] * CalculationArrays.QuantizationYTable[i, j] : block[i, j] * CalculationArrays.QuantizationCbCrTable[i, j];
-                    }
-                    blocks.RemoveAt(b);
-                    blocks.Insert(b, CalculateIDCTAndReshiftValues(block));
                 }
+                blocks[b] = CalculateIDCTAndReshiftValues(block);
             }
             return blocks;
         }
