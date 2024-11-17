@@ -1,5 +1,4 @@
 ﻿using System.Diagnostics;
-using System.Text;
 
 namespace ProjektMgr
 {
@@ -8,16 +7,32 @@ namespace ProjektMgr
     {
         //domyslnie 8x8, wedlug standardu jfif
         private static int blockSize = 8;
-        private static int ExtendedWidth { get; set; }
-        private static int ExtendedHeight { get; set; }
+        private static int padding = 0;
 
-        public static void CreateJFIFFile(byte[] bytes, long width, long height, int padding)
+        private static ArrayInfo YArrayInfo { get; set; } = new ArrayInfo();
+        private static ArrayInfo CbCrArrayInfo { get; set; } = new ArrayInfo();
+
+        public static byte[] CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
+            SetStartingWidthAndHeight(width, height, padding);
             Console.WriteLine("File size before encoding: " + (bytes.Length / 1048576.0).ToString("F2") + "mb");
             //encoding
             var encodedData = EncodeData(bytes, width, height, padding);
             //decoding
             var decodedData = DecodeData(encodedData.Y, encodedData.Cr, encodedData.Cb, width, height);
+
+            return decodedData;
+        }
+
+        private static void SetStartingWidthAndHeight(long width, long height, int pad)
+        {
+            YArrayInfo.StartingHeight = height;
+            YArrayInfo.StartingWidth = width;
+
+            CbCrArrayInfo.StartingHeight = height;
+            CbCrArrayInfo.StartingWidth = width;
+
+            padding = pad;
         }
 
         private static (string Y, string Cr, string Cb) EncodeData(byte[] bytes, long width, long height, int padding)
@@ -37,7 +52,7 @@ namespace ProjektMgr
         #region encoding
         private static (string Y, string Cr, string Cb) ReturnHuffmanEncodedData((float[,] Y, float[,] Cb, float[,] Cr) downsampledArray)
         {
-            var Y = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Y));
+            var Y = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Y, true));
             var Cr = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cr));
             var Cb = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cb));
 
@@ -157,25 +172,40 @@ namespace ProjektMgr
             return (Y, Cb, Cr);
         }
 
-        private static float[,] ExtendArrayIfNeeded(float[,] array)
+        private static float[,] ExtendArrayIfNeeded(float[,] array, bool isY = false)
         {
-            int originalRows = array.GetLength(0);
-            int originalCols = array.GetLength(1);
+            var originalRows = array.GetLength(0);
+            var originalCols = array.GetLength(1);
 
-            int rowsToAdd = (originalRows % 8 != 0) ? 8 - (originalRows % 8) : 0;
-            int colsToAdd = (originalCols % 8 != 0) ? 8 - (originalCols % 8) : 0;
+            var rowsToAdd = (originalRows % 8 != 0) ? 8 - (originalRows % 8) : 0;
+            var colsToAdd = (originalCols % 8 != 0) ? 8 - (originalCols % 8) : 0;
 
             if (rowsToAdd == 0 && colsToAdd == 0)
                 return array;
 
-            ExtendedHeight = originalRows + rowsToAdd;
-            ExtendedWidth = originalCols + colsToAdd;
+            long extendedHeight = 0;
+            long extendedWidth = 0;
 
-            float[,] newArray = new float[ExtendedHeight, ExtendedWidth];
-
-            for (int i = 0; i < ExtendedHeight; i++)
+            if (isY)
             {
-                for (int j = 0; j < ExtendedWidth; j++)
+                YArrayInfo.ExtendedHeight = originalRows + rowsToAdd;
+                YArrayInfo.ExtendedWidth = originalCols + colsToAdd;
+                extendedHeight = YArrayInfo.ExtendedHeight;
+                extendedWidth = YArrayInfo.ExtendedWidth;
+            }
+            else
+            {
+                CbCrArrayInfo.ExtendedHeight = originalRows + rowsToAdd;
+                CbCrArrayInfo.ExtendedWidth = originalCols + colsToAdd;
+                extendedHeight = CbCrArrayInfo.ExtendedHeight;
+                extendedWidth = CbCrArrayInfo.ExtendedWidth;
+            }
+
+            float[,] newArray = new float[extendedHeight, extendedWidth];
+
+            for (int i = 0; i < extendedHeight; i++)
+            {
+                for (int j = 0; j < extendedWidth; j++)
                 {
                     if (i >= originalRows)
                         newArray[i, j] = array[originalRows - 1, Math.Min(j, originalCols - 1)];
@@ -330,27 +360,119 @@ namespace ProjektMgr
             var dequantizedReshiftedCr = DequantizeBlocks(decodedZigZagCr);
             var dequantizedReshiftedCb = DequantizeBlocks(decodedZigZagCb);
 
-            var extendedY = Return2DArrayFromDequantizedList(dequantizedReshiftedY);
+            var extendedY = Return2DArrayFromDequantizedList(dequantizedReshiftedY, true);
             var extendedCb = Return2DArrayFromDequantizedList(dequantizedReshiftedCb);
             var extendedCr = Return2DArrayFromDequantizedList(dequantizedReshiftedCr);
 
-            ////var rgbImage = ReconstructImageFromYCbCr(spatialY, spatialCr, spatialCb);
+            var originalY = RestoreOriginalSize(extendedY, true);
+            var originalCb = RestoreOriginalSize(extendedCb);
+            var originalCr = RestoreOriginalSize(extendedCr);
+
+            var rgbData = ReturnRGBArray(originalY, originalCb, originalCr);
+            var res = PixelToByteArray(rgbData);
+
             Console.WriteLine("Decoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
-            return new byte[1];
+            return res;
         }
 
-        private static float[,] Return2DArrayFromDequantizedList(List<float[,]> dequantizedData)
+        public static byte[] PixelToByteArray(RGBPixel[,] pixels)
         {
-            var res = new float[ExtendedHeight, ExtendedWidth];
+            var height = pixels.GetLength(0);
+            var width = pixels.GetLength(1);
+            var length = height * width;
+
+            var oneDimPixels = new RGBPixel[length];
+            var z = 0;
+
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    oneDimPixels[z++] = pixels[i, j];
+
+            var byteLength = length * 3;
+            var result = new byte[byteLength];
+            var a = 0;
+
+            for (int i = 0; i < byteLength;)
+            {
+                result[i] = oneDimPixels[a].R;
+                result[i + 1] = oneDimPixels[a].G;
+                result[i + 2] = oneDimPixels[a].B;
+                i += 3;
+                a++;
+            }
+            return result;
+        }
+
+        private static RGBPixel[,] ReturnRGBArray(float[,] Y, float[,] Cb, float[,] Cr)
+        {
+            var width = YArrayInfo.StartingWidth;
+            var height = YArrayInfo.StartingHeight;
+            var res = new RGBPixel[height, width];
+
+            for (int i = 0; i < height; i++)
+            {
+                for (int j = 0; j < width; j++)
+                    res[i, j] = new RGBPixel(Y[i, j], Cb[i, j], Cr[i, j]);
+            }
+            return res;
+        }
+
+        private static float[,] RestoreOriginalSize(float[,] downsampledData, bool isY = false)
+        {
+            var width = isY ? YArrayInfo.StartingWidth : CbCrArrayInfo.StartingWidth;
+            var height = isY ? YArrayInfo.StartingHeight : CbCrArrayInfo.StartingHeight;
+
+            var xIter = 0;
+            var yIter = 0;
+
+            var firstRow = true;
+            var firstCol = true;
+
+            var res = new float[height, width];
+
+            for (int i = 0; i < height; i++)
+            {
+                for (int j = 0; j < width; j++)
+                {
+                    if (isY)
+                        res[i, j] = downsampledData[i, j];
+                    else
+                    {
+                        if (j % 2 == 0 && !firstCol)
+                            xIter++;
+                        if (j % 2 == 0 && firstCol)
+                            firstCol = false;
+
+                        res[i, j] = downsampledData[yIter, xIter];
+                    }
+                }
+                if (i % 2 == 0 && !firstRow)
+                    yIter++;
+                if (i % 2 == 0 && firstRow)
+                    firstRow = false;
+                xIter = 0;
+            }
+
+            return res;
+        }
+
+        private static float[,] Return2DArrayFromDequantizedList(List<float[,]> dequantizedData, bool isY = false)
+        {
+            var extendedHeight = isY ? YArrayInfo.ExtendedHeight : CbCrArrayInfo.ExtendedHeight;
+            var extendedWidth = isY ? YArrayInfo.ExtendedWidth : CbCrArrayInfo.ExtendedWidth;
+
+            var res = new float[extendedHeight, extendedWidth];
             var iter = 0;
 
-            for (int i = 0; i < ExtendedHeight; i += blockSize)
+            for (int i = 0; i < extendedHeight; i += blockSize)
             {
-                for (int j = 0; j < ExtendedWidth; j += blockSize)
+                for (int j = 0; j < extendedWidth; j += blockSize)
+                {
                     for (int x = 0; x < blockSize; x++)
                         for (int y = 0; y < blockSize; y++)
-                            res[ExtendedHeight + x, ExtendedWidth + y] = dequantizedData.ElementAt(iter)[x, y];
-                iter++;
+                            res[i + x, j + y] = dequantizedData.ElementAt(iter)[x, y];
+                    iter++;
+                }
             }
             return res;
         }
@@ -361,7 +483,6 @@ namespace ProjektMgr
             var alfaV = (float)(1 / Math.Sqrt(2));
             var pi = Math.PI;
             var blockSizeMultiplied = 2 * blockSize;
-
             var result = new float[blockSize, blockSize];
             var sum = 0.0f;
 
@@ -387,7 +508,6 @@ namespace ProjektMgr
             }
             return result;
         }
-
 
         private static List<float[,]> DequantizeBlocks(List<float[,]> blocks, bool isY = false)
         {
@@ -435,13 +555,6 @@ namespace ProjektMgr
                     temp = "";
                 }
             }
-
-            return res;
-        }
-
-        private static List<float[,]> DecodeFrequenciesIntoBlocks(List<int> frequencies)
-        {
-            var res = new List<float[,]>();
 
             return res;
         }

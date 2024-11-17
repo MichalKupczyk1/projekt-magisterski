@@ -17,6 +17,12 @@ namespace ProjektMgr
             G = g;
             B = b;
         }
+        public RGBPixel(float y, float cb, float cr)
+        {
+            R = (byte)((y - 16) * 1.164f + (cr - 128) * 1.596f);
+            G = (byte)((y - 16) * 1.164f - (cb - 128) * 0.392f - (cr - 128) * 0.813f);
+            B = (byte)((y - 16) * 1.164f + (cb - 128) * 2.017f);
+        }
     }
 
     public class YCbCr
