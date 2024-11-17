@@ -514,12 +514,13 @@ namespace ProjektMgr
             for (int b = 0; b < blocks.Count(); b++)
             {
                 var block = blocks[b];
+                blocks[b] = CalculateIDCTAndReshiftValues(block);
+
                 for (int i = 0; i < blockSize; i++)
                 {
                     for (int j = 0; j < blockSize; j++)
                         block[i, j] = isY ? block[i, j] * CalculationArrays.QuantizationYTable[i, j] : block[i, j] * CalculationArrays.QuantizationCbCrTable[i, j];
                 }
-                blocks[b] = CalculateIDCTAndReshiftValues(block);
             }
             return blocks;
         }

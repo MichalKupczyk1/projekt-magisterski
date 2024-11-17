@@ -11,7 +11,7 @@ namespace ProjektMgr
         public byte R { get; set; }
         public byte G { get; set; }
         public byte B { get; set; }
-        public RGBPixel(byte r, byte g, byte b)
+        public RGBPixel(byte b, byte g, byte r)
         {
             R = r;
             G = g;
