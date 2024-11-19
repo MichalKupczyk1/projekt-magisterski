@@ -17,25 +17,36 @@ namespace ProjektMgr
             G = g;
             B = b;
         }
-        public RGBPixel(float y, float cb, float cr)
+        public RGBPixel(double y, double cb, double cr)
         {
-            R = (byte)((y - 16) * 1.164f + (cr - 128) * 1.596f);
-            G = (byte)((y - 16) * 1.164f - (cb - 128) * 0.392f - (cr - 128) * 0.813f);
-            B = (byte)((y - 16) * 1.164f + (cb - 128) * 2.017f);
+            cb -= 128.0;
+            cr -= 128.0;
+
+            var r = y + 1.402 * cr;
+            var g = y - 0.344136 * cb - 0.714136 * cr;
+            var b = y + 1.772 * cb;
+
+            R = (byte)Math.Clamp(r, 0, 255);
+            G = (byte)Math.Clamp(g, 0, 255);
+            B = (byte)Math.Clamp(b, 0, 255);
         }
     }
 
     public class YCbCr
     {
-        public float Y { get; set; }
-        public float Cb { get; set; }
-        public float Cr { get; set; }
+        public double Y { get; set; }
+        public double Cb { get; set; }
+        public double Cr { get; set; }
 
         public YCbCr(byte r, byte g, byte b)
         {
-            Y = 16 + (65.738f * r / 256) + (129.057f * g / 256) + (25.064f * b / 256);
-            Cb = 128 - (37.945f * r / 256) - (74.494f * g / 256) + (112.439f * b / 256);
-            Cr = 128 + (112.439f * r / 256) - (94.154f * g / 256) - (18.285f * b / 256);
+            var y = 0.299 * r + 0.587 * g + 0.114 * b;
+            var cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128;
+            var cr = 0.5 * r - 0.418688 * g - 0.081312 * b + 128;
+
+            Y = Math.Clamp(y, 0, 255);
+            Cb = Math.Clamp(cb, 0, 255);
+            Cr = Math.Clamp(cr, 0, 255);
         }
     }
 }

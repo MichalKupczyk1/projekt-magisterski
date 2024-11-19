@@ -7,81 +7,390 @@ namespace ProjektMgr
     {
         //domyslnie 8x8, wedlug standardu jfif
         private static int blockSize = 8;
-        private static int padding = 0;
-
-        private static ArrayInfo YArrayInfo { get; set; } = new ArrayInfo();
-        private static ArrayInfo CbCrArrayInfo { get; set; } = new ArrayInfo();
 
         public static byte[] CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
-            SetStartingWidthAndHeight(width, height, padding);
-            Console.WriteLine("File size before encoding: " + (bytes.Length / 1048576.0).ToString("F2") + "mb");
-            //encoding
-            var encodedData = EncodeData(bytes, width, height, padding);
-            //decoding
-            var decodedData = DecodeData(encodedData.Y, encodedData.Cr, encodedData.Cb, width, height);
+            Console.WriteLine("File size before encoding: " + (bytes.Length / 1000000.0).ToString("F2") + "mb");
 
-            return decodedData;
+            var YCbCrArray = CreateTwoDimYCbCrPixelArray(CreateOneDimPixelArray(bytes, width, height, padding), width, height);
+            var downsampledData = SeparateArrayIntoDownsampledData(YCbCrArray);
+
+            var YBlocks = SeparateIntoBlocks(downsampledData.Y);
+            var CbBlocks = SeparateIntoBlocks(downsampledData.Cb);
+            var CrBlocks = SeparateIntoBlocks(downsampledData.Cr);
+
+            var YDCT = ApplyDCTAndQuantization(YBlocks, true);
+            var CbDCT = ApplyDCTAndQuantization(CbBlocks);
+            var CrDCT = ApplyDCTAndQuantization(CrBlocks);
+
+            var encodedY = GenerateHuffmanEncodedDataString(YDCT, isY: true);
+            var encodedCb = GenerateHuffmanEncodedDataString(CbDCT, isCb: true);
+            var encodedCr = GenerateHuffmanEncodedDataString(CrDCT, isCr: true);
+
+            Console.WriteLine("File size after encoding: " + ((encodedY.Length + encodedCb.Length + encodedCr.Length) / 1000000.0).ToString("F2") + "mb");
+
+            var DecodedYBlocks = ApplyIDCTAndDequantize(YDCT, true);
+            var DecodedCbBlocks = ApplyIDCTAndDequantize(CbDCT);
+            var DecodedCrBlocks = ApplyIDCTAndDequantize(CrDCT);
+
+            var MergedY = MergeBlocksInto2DArray(DecodedYBlocks, width, height, true);
+            var MergedCb = MergeBlocksInto2DArray(DecodedCbBlocks, width, height);
+            var MergedCr = MergeBlocksInto2DArray(DecodedCrBlocks, width, height);
+
+            var rgb = YCbCrToRGB(height, width, MergedY, MergedCb, MergedCr);
+
+            return PixelToByteArray(rgb);
         }
 
-        private static void SetStartingWidthAndHeight(long width, long height, int pad)
+        private static RGBPixel[,] YCbCrToRGB(long height, long width, double[,] y, double[,] cb, double[,] cr)
         {
-            YArrayInfo.StartingHeight = height;
-            YArrayInfo.StartingWidth = width;
+            var res = new RGBPixel[height, width];
 
-            CbCrArrayInfo.StartingHeight = height;
-            CbCrArrayInfo.StartingWidth = width;
-
-            padding = pad;
-        }
-
-        private static (string Y, string Cr, string Cb) EncodeData(byte[] bytes, long width, long height, int padding)
-        {
-            Stopwatch sw = new Stopwatch();
-            sw.Start();
-            var downsampledArray = GenerateDownsampledArray(bytes, width, height, padding);
-            var encodedData = ReturnHuffmanEncodedData(downsampledArray);
-            Console.WriteLine("Total encoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
-
-            var totalLenght = encodedData.Y.Length + encodedData.Cb.Length + encodedData.Cr.Length;
-            Console.WriteLine("File size after encoding: " + (totalLenght / 1048576.0).ToString("F2") + "mb");
-
-            return encodedData;
-        }
-
-        #region encoding
-        private static (string Y, string Cr, string Cb) ReturnHuffmanEncodedData((float[,] Y, float[,] Cb, float[,] Cr) downsampledArray)
-        {
-            var Y = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Y, true));
-            var Cr = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cr));
-            var Cb = ShiftValuesInArray(ExtendArrayIfNeeded(downsampledArray.Cb));
-
-            var YDCT = ReturnQuantizedBlock(Y, true);
-            var CrDCT = ReturnQuantizedBlock(Cr);
-            var CbDCT = ReturnQuantizedBlock(Cb);
-
-            var res = (GenerateHuffmanEncodedDataString(YDCT, isY: true), GenerateHuffmanEncodedDataString(CrDCT, isCr: true), GenerateHuffmanEncodedDataString(CbDCT, isCb: true));
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    res[i, j] = new RGBPixel(y: y[i, j], cb: cb[i, j], cr: cr[i, j]);
 
             return res;
         }
 
-        private static List<float[,]> ReturnQuantizedBlock(float[,] block, bool isY = false)
+        public static byte[] PixelToByteArray(RGBPixel[,] pixels)
         {
-            var res = new List<float[,]>();
-            var dcts = ApplyDCTToBlock(block);
-            foreach (var dct in dcts)
-                res.Add(isY ? QuantizeYBlock(dct) : QuantizeCbCrBlock(dct));
+            var height = pixels.GetLength(0);
+            var width = pixels.GetLength(1);
+            var length = height * width;
+
+            var oneDimPixels = new RGBPixel[length];
+            var z = 0;
+
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    oneDimPixels[z++] = pixels[i, j];
+
+            var byteLength = length * 3;
+            var result = new byte[byteLength];
+            var a = 0;
+
+            for (int i = 0; i < byteLength;)
+            {
+                result[i] = oneDimPixels[a].B;
+                result[i + 1] = oneDimPixels[a].G;
+                result[i + 2] = oneDimPixels[a].R;
+                i += 3;
+                a++;
+            }
+            return result;
+        }
+
+        private static double[,] MergeBlocksInto2DArray(List<double[,]> blocks, long width, long height, bool isY = false)
+        {
+            var res = new double[height, width];
+            var counter = 0;
+
+            var tempArrayHeight = isY ? height : height / 2;
+            var tempArrayWidth = isY ? width : width / 2;
+
+            if (isY)
+            {
+                for (int i = 0; i < tempArrayHeight - blockSize; i += blockSize)
+                {
+                    for (int j = 0; j < tempArrayWidth - blockSize; j += blockSize)
+                    {
+                        var block = blocks[counter++];
+                        for (int x = 0; x < blockSize; x++)
+                            for (int y = 0; y < blockSize; y++)
+                                res[i + x, j + y] = block[x, y] + 128.0;
+                    }
+                }
+            }
+            else
+            {
+                var array = new double[tempArrayHeight, tempArrayWidth];
+                for (int i = 0; i < tempArrayHeight - blockSize; i += blockSize)
+                {
+                    for (int j = 0; j < tempArrayWidth - blockSize; j += blockSize)
+                    {
+                        var block = blocks[counter++];
+                        for (int x = 0; x < blockSize; x++)
+                            for (int y = 0; y < blockSize; y++)
+                                array[i + x, j + y] = block[x, y];
+                    }
+                }
+                for (int i = 0; i < tempArrayHeight; i++)
+                {
+                    for (int j = 0; j < tempArrayWidth; j++)
+                    {
+                        var temp = array[i, j] + 128.0;
+                        res[i * 2, j * 2] = temp;
+                        res[i * 2, j * 2 + 1] = temp;
+                        res[i * 2 + 1, j * 2] = temp;
+                        res[i * 2 + 1, j * 2 + 1] = temp;
+                    }
+                }
+            }
             return res;
         }
 
-        private static (float[,] Y, float[,] Cb, float[,] Cr) GenerateDownsampledArray(byte[] bytes, long width, long height, int padding)
+        private static List<double[,]> ApplyIDCTAndDequantize(List<double[,]> blocks, bool isY = false)
         {
-            var oneDimArray = CreateOneDimRGBPixelArray(bytes, width, height, padding);
-            var YCbCrArray = CreateTwoDimYCbCrPixelArray(oneDimArray, width, height);
-            return ApplyDownsampling(YCbCrArray, width, height);
+            var resList = new List<double[,]>();
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                var temp = new double[blockSize, blockSize];
+                for (int x = 0; x < blockSize; x++)
+                    for (int y = 0; y < blockSize; y++)
+                        temp[x, y] = blocks[i][x, y];
+                resList.Add(ApplyIDCT((DequantizeBlock(temp, isY))));
+            }
+
+            return resList;
         }
 
-        private static string GenerateHuffmanEncodedDataString(List<float[,]> blocks, bool isY = false, bool isCr = false, bool isCb = false)
+        private static double[,] ApplyIDCT(double[,] block)
+        {
+            var height = block.GetLength(0);
+            var width = block.GetLength(1);
+
+            var res = new double[height, width];
+            for (int i = 0; i < height; i++)
+            {
+                for (int j = 0; j < width; j++)
+                {
+                    var sum = 0.0;
+                    for (int x = 0; x < height; x++)
+                    {
+                        for (int y = 0; y < width; y++)
+                        {
+                            var cu = x == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                            var cv = y == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                            sum += block[x, y] * cu * cv * Math.Cos(((Math.PI * (2.0 * i + 1.0) * x) / (2.0 * blockSize))) * Math.Cos(((Math.PI * (2.0 * j + 1.0) * y) / (2.0 * blockSize)));
+                        }
+                    }
+                    res[i, j] = 0.25 * sum;
+                }
+            }
+            return res;
+        }
+
+        private static double[,] DequantizeBlock(double[,] block, bool isY = false)
+        {
+            var height = block.GetLength(0); ;
+            var width = block.GetLength(1);
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    block[i, j] = isY ? block[i, j] * CalculationArrays.QuantizationYTable[i, j] : block[i, j] * CalculationArrays.QuantizationCbCrTable[i, j];
+
+            return block;
+        }
+
+        private static List<double[,]> ApplyDCTAndQuantization(List<double[,]> blocks, bool isY = false)
+        {
+            var resList = new List<double[,]>();
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                var temp = new double[blockSize, blockSize];
+                for (int x = 0; x < blockSize; x++)
+                    for (int y = 0; y < blockSize; y++)
+                        temp[x, y] = blocks[i][x, y];
+                resList.Add(QuantizeBlock(ApplyDCT(temp), isY));
+            }
+
+            return resList;
+        }
+
+        private static double[,] QuantizeBlock(double[,] block, bool isY = false)
+        {
+            var height = block.GetLength(0); ;
+            var width = block.GetLength(1);
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    block[i, j] = isY ? Math.Round(block[i, j] / CalculationArrays.QuantizationYTable[i, j]) : Math.Round(block[i, j] / CalculationArrays.QuantizationCbCrTable[i, j]);
+
+            return block;
+        }
+
+        private static double[,] ApplyDCT(double[,] block)
+        {
+            var height = block.GetLength(0);
+            var width = block.GetLength(1);
+
+            var res = new double[height, width];
+            for (int i = 0; i < height; i++)
+            {
+                for (int j = 0; j < width; j++)
+                {
+                    var sum = 0.0;
+                    for (int x = 0; x < height; x++)
+                    {
+                        for (int y = 0; y < width; y++)
+                        {
+                            sum += block[x, y] * Math.Cos(((Math.PI * (2.0 * x + 1.0) * i) / (2.0 * blockSize))) * Math.Cos(((Math.PI * (2.0 * y + 1.0) * j) / (2.0 * blockSize)));
+                        }
+                    }
+                    var cu = i == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                    var cv = j == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+
+                    res[i, j] = 0.25 * cu * cv * sum;
+                }
+            }
+            return res;
+        }
+
+        private static List<double[,]> SeparateIntoBlocks(double[,] data)
+        {
+            var res = new List<double[,]>();
+            var height = data.GetLength(0);
+            var width = data.GetLength(1);
+
+            for (int i = 0; i < height - blockSize; i += blockSize)
+            {
+                for (int j = 0; j < width - blockSize; j += blockSize)
+                {
+                    var block = new double[blockSize, blockSize];
+                    for (int x = 0; x < blockSize; x++)
+                        for (int y = 0; y < blockSize; y++)
+                            block[x, y] = data[i + x, y + j];
+                    res.Add(block);
+                }
+            }
+            return res;
+        }
+
+        private static (double[,] Y, double[,] Cb, double[,] Cr) SeparateArrayIntoDownsampledData(YCbCr[,] YCbCrData)
+        {
+            var height = YCbCrData.GetLength(0);
+            var width = YCbCrData.GetLength(1);
+
+            var y = new double[height, width];
+            var downsampledCb = new double[height / 2, width / 2];
+            var downsampledCr = new double[height / 2, width / 2];
+
+            for (int i = 0; i < height; i++)
+                for (int j = 0; j < width; j++)
+                    y[i, j] = YCbCrData[i, j].Y - 128.0;
+
+            for (int i = 0; i < height / 2; i++)
+            {
+                for (int j = 0; j < width / 2; j++)
+                {
+                    downsampledCb[i, j] =
+                        ((YCbCrData[i * 2, j * 2].Cb +
+                         YCbCrData[i * 2, j * 2 + 1].Cb +
+                         YCbCrData[i * 2 + 1, j * 2].Cb +
+                         YCbCrData[i * 2 + 1, j * 2 + 1].Cb) / 4.0) - 128.0;
+
+                    downsampledCr[i, j] =
+                        ((YCbCrData[i * 2, j * 2].Cr +
+                         YCbCrData[i * 2, j * 2 + 1].Cr +
+                         YCbCrData[i * 2 + 1, j * 2].Cr +
+                         YCbCrData[i * 2 + 1, j * 2 + 1].Cr) / 4.0) - 128.0;
+                }
+            }
+
+            return (y, downsampledCb, downsampledCr);
+        }
+
+        private static RGBPixel[] CreateOneDimPixelArray(byte[] bytes, long width, long height, int padding)
+        {
+            var pixelsonedim = new RGBPixel[width * height];
+            var z = 0;
+            var i = 0;
+            var counter = 0;
+
+            for (i = 0; i < bytes.Length - 1;)
+            {
+                if (padding != 0 && counter != 0 && (counter / 3) % width == 0)
+                {
+                    i += padding;
+                    counter = 0;
+                    continue;
+                }
+                pixelsonedim[z++] = new RGBPixel(bytes[i], bytes[i + 1], bytes[i + 2]);
+                i += 3;
+
+                if (padding != 0)
+                    counter += 3;
+            }
+            return pixelsonedim;
+        }
+
+        private static YCbCr[,] CreateTwoDimYCbCrPixelArray(RGBPixel[] pixels, long width, long height)
+        {
+            var twoDimArray = new YCbCr[height, width];
+            var count = 0;
+
+            for (int i = 0; i < height; i++)
+            {
+                for (int j = 0; j < width; j++)
+                {
+                    var pixel = pixels[count];
+                    twoDimArray[i, j] = new YCbCr(pixel.R, pixel.G, pixel.B);
+                    count++;
+                }
+            }
+            return twoDimArray;
+        }
+
+        private static int[] ZigZagScan(double[,] block)
+        {
+            var res = new int[64];
+
+            for (int i = 0; i < 64; i++)
+            {
+                int x = CalculationArrays.ZigZagScan[i] / 8;
+                int y = CalculationArrays.ZigZagScan[i] % 8;
+                res[i] = (int)block[x, y];
+            }
+
+            return res;
+        }
+
+        private static Dictionary<int, int> GenerateFrequencyDictionary(int[] scannedData)
+        {
+            var res = new Dictionary<int, int>();
+            var groups = scannedData.GroupBy(x => x)
+                .OrderBy(x => x.Count())
+                .ToList();
+
+            foreach (var group in groups)
+                res.Add(group.First(), group.Count());
+
+            return res;
+        }
+
+        private static List<int> DecodeHuffmanData(string encodedData, Dictionary<int, string> dictionary)
+        {
+            var res = new List<int>();
+
+            var reverseDictionary = dictionary.ToDictionary(x => x.Value, x => x.Key);
+
+            var temp = "";
+            foreach (var character in encodedData)
+            {
+                temp += character;
+                if (reverseDictionary.ContainsKey(temp))
+                {
+                    res.Add(reverseDictionary[temp]);
+                    temp = "";
+                }
+            }
+
+            return res;
+        }
+
+        private static double[,] CreateBlockFromZigZagData(int[] zigZagData)
+        {
+            var res = new double[blockSize, blockSize];
+
+            for (int i = 0; i < blockSize * blockSize; i++)
+            {
+                int x = CalculationArrays.ZigZagScan[i] / 8;
+                int y = CalculationArrays.ZigZagScan[i] % 8;
+                res[x, y] = zigZagData[i];
+            }
+
+            return res;
+        }
+        private static string GenerateHuffmanEncodedDataString(List<double[,]> blocks, bool isY = false, bool isCr = false, bool isCb = false)
         {
             var zigZagData = EncodeAllBlocks(blocks);
             var frequency = GenerateFrequencyDictionary(zigZagData);
@@ -109,213 +418,7 @@ namespace ProjektMgr
             return String.Join("", res);
         }
 
-        private static RGBPixel[] CreateOneDimRGBPixelArray(byte[] bytes, long width, long height, int padding)
-        {
-            var pixelsOneDim = new RGBPixel[width * height];
-            var z = 0;
-            var i = 0;
-            var counter = 0;
-
-            for (i = 0; i < bytes.Length - 1;)
-            {
-                if (padding != 0 && counter != 0 && (counter / 3) % width == 0)
-                {
-                    i += padding;
-                    counter = 0;
-                    continue;
-                }
-                pixelsOneDim[z++] = new RGBPixel(bytes[i], bytes[i + 1], bytes[i + 2]);
-                i += 3;
-
-                if (padding != 0)
-                    counter += 3;
-            }
-            return pixelsOneDim;
-        }
-
-        private static YCbCr[,] CreateTwoDimYCbCrPixelArray(RGBPixel[] pixels, long width, long height)
-        {
-            var twoDimArray = new YCbCr[height, width];
-            var count = 0;
-
-            for (int i = 0; i < height; i++)
-            {
-                for (int j = 0; j < width; j++)
-                {
-                    var pixel = pixels[count];
-                    twoDimArray[i, j] = new YCbCr(pixel.R, pixel.G, pixel.B);
-                    count++;
-                }
-            }
-            return twoDimArray;
-        }
-
-        private static (float[,] Y, float[,] Cb, float[,] Cr) ApplyDownsampling(YCbCr[,] YCbCrArray, long width, long height)
-        {
-            float[,] Y = new float[height, width];
-            float[,] Cb = new float[height / 2, width / 2];
-            float[,] Cr = new float[height / 2, width / 2];
-
-            for (int i = 0; i < height; i++)
-            {
-                for (int j = 0; j < width; j++)
-                {
-                    Y[i, j] = YCbCrArray[i, j].Y;
-                    if (i % 2 == 0 && j % 2 == 0)
-                    {
-                        Cb[i / 2, j / 2] = YCbCrArray[i, j].Cb;
-                        Cr[i / 2, j / 2] = YCbCrArray[i, j].Cr;
-                    }
-                }
-            }
-
-            return (Y, Cb, Cr);
-        }
-
-        private static float[,] ExtendArrayIfNeeded(float[,] array, bool isY = false)
-        {
-            var originalRows = array.GetLength(0);
-            var originalCols = array.GetLength(1);
-
-            var rowsToAdd = (originalRows % 8 != 0) ? 8 - (originalRows % 8) : 0;
-            var colsToAdd = (originalCols % 8 != 0) ? 8 - (originalCols % 8) : 0;
-
-            if (rowsToAdd == 0 && colsToAdd == 0)
-                return array;
-
-            long extendedHeight = 0;
-            long extendedWidth = 0;
-
-            if (isY)
-            {
-                YArrayInfo.ExtendedHeight = originalRows + rowsToAdd;
-                YArrayInfo.ExtendedWidth = originalCols + colsToAdd;
-                extendedHeight = YArrayInfo.ExtendedHeight;
-                extendedWidth = YArrayInfo.ExtendedWidth;
-            }
-            else
-            {
-                CbCrArrayInfo.ExtendedHeight = originalRows + rowsToAdd;
-                CbCrArrayInfo.ExtendedWidth = originalCols + colsToAdd;
-                extendedHeight = CbCrArrayInfo.ExtendedHeight;
-                extendedWidth = CbCrArrayInfo.ExtendedWidth;
-            }
-
-            float[,] newArray = new float[extendedHeight, extendedWidth];
-
-            for (int i = 0; i < extendedHeight; i++)
-            {
-                for (int j = 0; j < extendedWidth; j++)
-                {
-                    if (i >= originalRows)
-                        newArray[i, j] = array[originalRows - 1, Math.Min(j, originalCols - 1)];
-
-                    else if (j >= originalCols)
-                        newArray[i, j] = array[i, originalCols - 1];
-
-                    else
-                        newArray[i, j] = array[i, j];
-                }
-            }
-
-            return newArray;
-        }
-
-        private static float[,] CalculateDCT(float[,] block)
-        {
-            var height = block.GetLength(0);
-            var width = block.GetLength(1);
-            var result = new float[height, width];
-
-            for (int u = 0; u < blockSize; u++)
-            {
-                for (int v = 0; v < blockSize; v++)
-                {
-                    float sum = 0.0f;
-
-                    for (int x = 0; x < blockSize; x++)
-                        for (int y = 0; y < blockSize; y++)
-                            sum += block[x, y] * (float)Math.Cos(((2 * x + 1) * u * Math.PI) / (2 * blockSize)) * (float)Math.Cos(((2 * y + 1) * v * Math.PI) / (2 * blockSize));
-
-                    float alphaU = (u == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
-                    float alphaV = (v == 0) ? (float)(1 / Math.Sqrt(2)) : 1.0f;
-                    result[u, v] = 0.25f * alphaU * alphaV * sum;
-                }
-            }
-            return result;
-        }
-
-        public static float[,] ShiftValuesInArray(float[,] array)
-        {
-            var height = array.GetLength(0);
-            var width = array.GetLength(1);
-
-            for (int i = 0; i < height; i++)
-                for (int j = 0; j < width; j++)
-                    array[i, j] -= 128;
-
-            return array;
-        }
-
-        private static List<float[,]> ApplyDCTToBlock(float[,] array)
-        {
-            var height = array.GetLength(0);
-            var width = array.GetLength(1);
-            var res = new List<float[,]>();
-
-            for (int i = 0; i < height; i += blockSize)
-            {
-                for (int j = 0; j < width; j += blockSize)
-                {
-                    var block = new float[blockSize, blockSize];
-                    for (int x = 0; x < blockSize; x++)
-                    {
-                        for (int y = 0; y < blockSize; y++)
-                            block[x, y] = array[i + x, j + y];
-                    }
-                    res.Add(CalculateDCT(block));
-                }
-            }
-            return res;
-        }
-
-        private static float[,] QuantizeYBlock(float[,] block)
-        {
-            var res = new float[blockSize, blockSize];
-
-            for (int i = 0; i < blockSize; i++)
-                for (int j = 0; j < blockSize; j++)
-                    res[i, j] = (float)Math.Round(block[i, j] / CalculationArrays.QuantizationYTable[i, j]);
-
-            return res;
-        }
-
-        private static float[,] QuantizeCbCrBlock(float[,] block)
-        {
-            var res = new float[blockSize, blockSize];
-
-            for (int i = 0; i < blockSize; i++)
-                for (int j = 0; j < blockSize; j++)
-                    res[i, j] = (float)Math.Round(block[i, j] / CalculationArrays.QuantizationCbCrTable[i, j]);
-
-            return res;
-        }
-
-        private static int[] ZigZagScan(float[,] block)
-        {
-            var res = new int[64];
-
-            for (int i = 0; i < 64; i++)
-            {
-                int x = CalculationArrays.ZigZagScan[i] / 8;
-                int y = CalculationArrays.ZigZagScan[i] % 8;
-                res[i] = (int)block[x, y];
-            }
-
-            return res;
-        }
-
-        private static int[] EncodeAllBlocks(List<float[,]> blocks)
+        private static int[] EncodeAllBlocks(List<double[,]> blocks)
         {
             var res = new int[8 * 8 * blocks.Count()];
             var stopPoint = 0;
@@ -327,253 +430,6 @@ namespace ProjektMgr
             }
             return res;
         }
-
-        private static Dictionary<int, int> GenerateFrequencyDictionary(int[] scannedData)
-        {
-            var res = new Dictionary<int, int>();
-            var groups = scannedData.GroupBy(x => x)
-                .OrderBy(x => x.Count())
-                .ToList();
-
-            foreach (var group in groups)
-                res.Add(group.First(), group.Count());
-
-            return res;
-        }
-        #endregion
-
-        #region decoding
-        private static byte[] DecodeData(string Y, string Cr, string Cb, long width, long height)
-        {
-            Stopwatch sw = new Stopwatch();
-            sw.Start();
-
-            var decodedY = DecodeHuffmanData(Y, HuffmanCoding.YDataDictionary);
-            var decodedCr = DecodeHuffmanData(Cr, HuffmanCoding.CrDataDictionary);
-            var decodedCb = DecodeHuffmanData(Cb, HuffmanCoding.CbDataDictionary);
-
-            var decodedZigZagY = DecodeZigZagDataIntoBlocks(decodedY);
-            var decodedZigZagCb = DecodeZigZagDataIntoBlocks(decodedCr);
-            var decodedZigZagCr = DecodeZigZagDataIntoBlocks(decodedCb);
-
-            var dequantizedReshiftedY = DequantizeBlocks(decodedZigZagY, true);
-            var dequantizedReshiftedCr = DequantizeBlocks(decodedZigZagCr);
-            var dequantizedReshiftedCb = DequantizeBlocks(decodedZigZagCb);
-
-            var extendedY = Return2DArrayFromDequantizedList(dequantizedReshiftedY, true);
-            var extendedCb = Return2DArrayFromDequantizedList(dequantizedReshiftedCb);
-            var extendedCr = Return2DArrayFromDequantizedList(dequantizedReshiftedCr);
-
-            var originalY = RestoreOriginalSize(extendedY, true);
-            var originalCb = RestoreOriginalSize(extendedCb);
-            var originalCr = RestoreOriginalSize(extendedCr);
-
-            var rgbData = ReturnRGBArray(originalY, originalCb, originalCr);
-            var res = PixelToByteArray(rgbData);
-
-            Console.WriteLine("Decoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
-            return res;
-        }
-
-        public static byte[] PixelToByteArray(RGBPixel[,] pixels)
-        {
-            var height = pixels.GetLength(0);
-            var width = pixels.GetLength(1);
-            var length = height * width;
-
-            var oneDimPixels = new RGBPixel[length];
-            var z = 0;
-
-            for (int i = 0; i < height; i++)
-                for (int j = 0; j < width; j++)
-                    oneDimPixels[z++] = pixels[i, j];
-
-            var byteLength = length * 3;
-            var result = new byte[byteLength];
-            var a = 0;
-
-            for (int i = 0; i < byteLength;)
-            {
-                result[i] = oneDimPixels[a].R;
-                result[i + 1] = oneDimPixels[a].G;
-                result[i + 2] = oneDimPixels[a].B;
-                i += 3;
-                a++;
-            }
-            return result;
-        }
-
-        private static RGBPixel[,] ReturnRGBArray(float[,] Y, float[,] Cb, float[,] Cr)
-        {
-            var width = YArrayInfo.StartingWidth;
-            var height = YArrayInfo.StartingHeight;
-            var res = new RGBPixel[height, width];
-
-            for (int i = 0; i < height; i++)
-            {
-                for (int j = 0; j < width; j++)
-                    res[i, j] = new RGBPixel(Y[i, j], Cb[i, j], Cr[i, j]);
-            }
-            return res;
-        }
-
-        private static float[,] RestoreOriginalSize(float[,] downsampledData, bool isY = false)
-        {
-            var width = isY ? YArrayInfo.StartingWidth : CbCrArrayInfo.StartingWidth;
-            var height = isY ? YArrayInfo.StartingHeight : CbCrArrayInfo.StartingHeight;
-
-            var xIter = 0;
-            var yIter = 0;
-
-            var firstRow = true;
-            var firstCol = true;
-
-            var res = new float[height, width];
-
-            for (int i = 0; i < height; i++)
-            {
-                for (int j = 0; j < width; j++)
-                {
-                    if (isY)
-                        res[i, j] = downsampledData[i, j];
-                    else
-                    {
-                        if (j % 2 == 0 && !firstCol)
-                            xIter++;
-                        if (j % 2 == 0 && firstCol)
-                            firstCol = false;
-
-                        res[i, j] = downsampledData[yIter, xIter];
-                    }
-                }
-                if (i % 2 == 0 && !firstRow)
-                    yIter++;
-                if (i % 2 == 0 && firstRow)
-                    firstRow = false;
-                xIter = 0;
-            }
-
-            return res;
-        }
-
-        private static float[,] Return2DArrayFromDequantizedList(List<float[,]> dequantizedData, bool isY = false)
-        {
-            var extendedHeight = isY ? YArrayInfo.ExtendedHeight : CbCrArrayInfo.ExtendedHeight;
-            var extendedWidth = isY ? YArrayInfo.ExtendedWidth : CbCrArrayInfo.ExtendedWidth;
-
-            var res = new float[extendedHeight, extendedWidth];
-            var iter = 0;
-
-            for (int i = 0; i < extendedHeight; i += blockSize)
-            {
-                for (int j = 0; j < extendedWidth; j += blockSize)
-                {
-                    for (int x = 0; x < blockSize; x++)
-                        for (int y = 0; y < blockSize; y++)
-                            res[i + x, j + y] = dequantizedData.ElementAt(iter)[x, y];
-                    iter++;
-                }
-            }
-            return res;
-        }
-
-        private static float[,] CalculateIDCTAndReshiftValues(float[,] block)
-        {
-            var alfaU = (float)(1 / Math.Sqrt(2));
-            var alfaV = (float)(1 / Math.Sqrt(2));
-            var pi = Math.PI;
-            var blockSizeMultiplied = 2 * blockSize;
-            var result = new float[blockSize, blockSize];
-            var sum = 0.0f;
-
-            for (int x = 0; x < blockSize; x++)
-            {
-                sum = 0.0f;
-                for (int y = 0; y < blockSize; y++)
-                {
-                    for (int u = 0; u < blockSize; u++)
-                    {
-                        for (int v = 0; v < blockSize; v++)
-                        {
-                            float alphaU = (u == 0) ? alfaU : 1.0f;
-                            float alphaV = (v == 0) ? alfaV : 1.0f;
-
-                            sum += alphaU * alphaV * block[u, v] *
-                                   (float)Math.Cos(((2 * x + 1) * u * pi) / (blockSizeMultiplied)) *
-                                   (float)Math.Cos(((2 * y + 1) * v * pi) / (blockSizeMultiplied));
-                        }
-                    }
-                    result[x, y] = 0.25f * sum + 128;
-                }
-            }
-            return result;
-        }
-
-        private static List<float[,]> DequantizeBlocks(List<float[,]> blocks, bool isY = false)
-        {
-            for (int b = 0; b < blocks.Count(); b++)
-            {
-                var block = blocks[b];
-                blocks[b] = CalculateIDCTAndReshiftValues(block);
-
-                for (int i = 0; i < blockSize; i++)
-                {
-                    for (int j = 0; j < blockSize; j++)
-                        block[i, j] = isY ? block[i, j] * CalculationArrays.QuantizationYTable[i, j] : block[i, j] * CalculationArrays.QuantizationCbCrTable[i, j];
-                }
-            }
-            return blocks;
-        }
-
-        private static List<float[,]> DecodeZigZagDataIntoBlocks(List<int> decodedData)
-        {
-            var res = new List<float[,]>();
-            var currentPos = 0;
-            var blockShift = 64;
-
-            while (currentPos < decodedData.Count())
-            {
-                var first64 = decodedData.GetRange(currentPos, blockShift).ToArray();
-                res.Add(CreateBlockFromZigZagData(first64));
-                currentPos += blockShift;
-            }
-            return res;
-        }
-
-        private static List<int> DecodeHuffmanData(string encodedData, Dictionary<int, string> dictionary)
-        {
-            var res = new List<int>();
-
-            var reverseDictionary = dictionary.ToDictionary(x => x.Value, x => x.Key);
-
-            var temp = "";
-            foreach (var character in encodedData)
-            {
-                temp += character;
-                if (reverseDictionary.ContainsKey(temp))
-                {
-                    res.Add(reverseDictionary[temp]);
-                    temp = "";
-                }
-            }
-
-            return res;
-        }
-
-        private static float[,] CreateBlockFromZigZagData(int[] zigZagData)
-        {
-            var res = new float[blockSize, blockSize];
-
-            for (int i = 0; i < blockSize * blockSize; i++)
-            {
-                int x = CalculationArrays.ZigZagScan[i] / 8;
-                int y = CalculationArrays.ZigZagScan[i] % 8;
-                res[x, y] = zigZagData[i];
-            }
-
-            return res;
-        }
-        #endregion
     }
 
     public static class CalculationArrays
