@@ -1,4 +1,6 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using static System.Reflection.Metadata.BlobBuilder;
 
 namespace ProjektMgr
@@ -11,11 +13,10 @@ namespace ProjektMgr
 
         public static async Task<byte[]> CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
-            Console.WriteLine("File size before encoding: " + (bytes.Length / 1000000.0).ToString("F2") + "mb");
             Stopwatch sw = new Stopwatch();
             sw.Start();
-            var YCbCrArray = CreateTwoDimYCbCrPixelArray(CreateOneDimPixelArray(bytes, width, height, padding), width, height);
-            var downsampledData = SeparateArrayIntoDownsampledData(YCbCrArray);
+            var arrays = CreateTwoDimYCbCrArrays(bytes, width, height, padding);
+            var downsampledData = ApplyDownsamplingAndExtendArrays(arrays.Y, arrays.Cb, arrays.Cr);
 
             var YBlocks = SeparateIntoBlocks(downsampledData.Y);
             var CbBlocks = SeparateIntoBlocks(downsampledData.Cb);
@@ -29,9 +30,7 @@ namespace ProjektMgr
             var encodedCb = GenerateHuffmanEncodedDataString(CbDCT, isCb: true);
             var encodedCr = GenerateHuffmanEncodedDataString(CrDCT, isCr: true);
 
-            Console.WriteLine("Encoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
-            sw.Restart();
-
+            Console.WriteLine("Encoding: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
             Console.WriteLine("File size after encoding: " + ((encodedY.Length + encodedCb.Length + encodedCr.Length) / 1000000.0).ToString("F2") + "mb");
 
             var decodedY = DecodeHuffmanData(encodedY, HuffmanCoding.YDataDictionary);
@@ -191,27 +190,59 @@ namespace ProjektMgr
             return block;
         }
 
-        private static async Task<List<double[,]>> ApplyDCTAndQuantization(List<double[,]> blocks, bool isY = false)
+        private static async Task<double[][,]> ApplyDCTAndQuantization(double[][,] blocks, bool isY = false)
         {
-            var tasks = blocks.Select((block, index) =>
-                Task.Run(() => new { Index = index, Block = ApplyDCT(block) }));
+            var threadsAvailable = Environment.ProcessorCount;
+            var chunkSize = (int)Math.Ceiling((double)blocks.Length / threadsAvailable);
 
-            var resList = await Task.WhenAll(tasks);
+            var results = new double[blocks.Length][,];
+            var tasks = new Task[threadsAvailable];
 
-            return resList.OrderBy(x => x.Index)
-                .Select(x => QuantizeBlock(x.Block, isY))
-                .ToList();
-        }
+            for (var thread = 0; thread < threadsAvailable; thread++)
+            {
+                var start = thread * chunkSize;
+                var end = Math.Min(start + chunkSize, blocks.Length);
 
-        private static double[,] QuantizeBlock(double[,] block, bool isY = false)
-        {
-            var height = block.GetLength(0); ;
-            var width = block.GetLength(1);
-            for (int i = 0; i < height; i++)
-                for (int j = 0; j < width; j++)
-                    block[i, j] = isY ? Math.Round(block[i, j] / CalculationArrays.QuantizationYTable[i, j]) : Math.Round(block[i, j] / CalculationArrays.QuantizationCbCrTable[i, j]);
+                tasks[thread] = Task.Run(() =>
+                {
+                    for (int i = start; i < end; i++)
+                    {
+                        var block = blocks[i];
 
-            return block;
+                        var res = new double[blockSize, blockSize];
+                        var cos = new double[blockSize, blockSize];
+                        var pi = Math.PI;
+                        var multipliedBlockSize = 2.0 * blockSize;
+                        var sum = 0.0;
+
+                        for (int u = 0; u < blockSize; u++)
+                            for (int x = 0; x < blockSize; x++)
+                                cos[u, x] = Math.Cos((pi * (2.0 * x + 1.0) * u) / multipliedBlockSize);
+
+                        for (int a = 0; a < blockSize; a++)
+                        {
+                            for (int b = 0; b < blockSize; b++)
+                            {
+                                var cu = a == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                                var cv = b == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                                sum = 0.0;
+
+                                for (int x = 0; x < blockSize; x++)
+                                    for (int y = 0; y < blockSize; y++)
+                                        sum += block[x, y] * cos[a, x] * cos[b, y];
+
+                                res[a, b] = 0.25 * cu * cv * sum;
+                            }
+                        }
+                        for (int x = 0; x < blockSize; x++)
+                            for (int y = 0; y < blockSize; y++)
+                                block[x, y] = isY ? Math.Round(res[x, y] / CalculationArrays.QuantizationYTable[x, y]) : Math.Round(res[x, y] / CalculationArrays.QuantizationCbCrTable[x, y]);
+                        results[i] = block;
+                    }
+                });
+            }
+            await Task.WhenAll(tasks);
+            return results;
         }
 
         private static double[,] ApplyDCT(double[,] block)
@@ -241,11 +272,12 @@ namespace ProjektMgr
             return res;
         }
 
-        private static List<double[,]> SeparateIntoBlocks(double[,] data)
+        private static double[][,] SeparateIntoBlocks(double[,] data)
         {
-            var res = new List<double[,]>();
             var height = data.GetLength(0);
             var width = data.GetLength(1);
+            var counter = 0;
+            var resArray = new double[((height - blockSize) * (width - blockSize)) / (blockSize * blockSize)][,];
 
             for (int i = 0; i < height - blockSize; i += blockSize)
             {
@@ -255,49 +287,79 @@ namespace ProjektMgr
                     for (int x = 0; x < blockSize; x++)
                         for (int y = 0; y < blockSize; y++)
                             block[x, y] = data[i + x, y + j];
-                    res.Add(block);
+                    resArray[counter++] = block;
                 }
             }
-            return res;
+            return resArray;
         }
 
-        private static (double[,] Y, double[,] Cb, double[,] Cr) SeparateArrayIntoDownsampledData(YCbCr[,] YCbCrData)
+        private static (double[,] Y, double[,] Cb, double[,] Cr) ApplyDownsamplingAndExtendArrays(double[,] yArray, double[,] cbArray, double[,] crArray)
         {
-            var height = YCbCrData.GetLength(0);
-            var width = YCbCrData.GetLength(1);
+            var height = yArray.GetLength(0);
+            var width = yArray.GetLength(1);
 
-            var y = new double[height, width];
-            var downsampledCb = new double[height / 2, width / 2];
-            var downsampledCr = new double[height / 2, width / 2];
+            var extendedHeight = (long)Math.Ceiling(height / 8.0) * 8;
+            var extendedWidth = (long)Math.Ceiling(width / 8.0) * 8;
+
+            var resY = new double[extendedHeight, extendedWidth];
 
             for (int i = 0; i < height; i++)
                 for (int j = 0; j < width; j++)
-                    y[i, j] = YCbCrData[i, j].Y - 128.0;
+                    resY[i, j] = yArray[i, j] - 128.0;
 
-            for (int i = 0; i < height / 2; i++)
+            resY = ExtendArray(resY, height, extendedHeight, width, extendedWidth);
+
+            var downsampledHeight = height / 2;
+            var downsampledWidth = width / 2;
+
+            extendedHeight = (long)Math.Ceiling(downsampledHeight / 8.0) * 8;
+            extendedWidth = (long)Math.Ceiling(downsampledWidth / 8.0) * 8;
+
+            var downsampledCb = new double[extendedHeight, extendedWidth];
+            var downsampledCr = new double[extendedHeight, extendedWidth];
+
+            for (int i = 0; i < downsampledHeight; i++)
             {
-                for (int j = 0; j < width / 2; j++)
+                for (int j = 0; j < downsampledWidth; j++)
                 {
                     downsampledCb[i, j] =
-                        ((YCbCrData[i * 2, j * 2].Cb +
-                         YCbCrData[i * 2, j * 2 + 1].Cb +
-                         YCbCrData[i * 2 + 1, j * 2].Cb +
-                         YCbCrData[i * 2 + 1, j * 2 + 1].Cb) / 4.0) - 128.0;
+                        ((cbArray[i * 2, j * 2] +
+                         cbArray[i * 2, j * 2 + 1] +
+                         cbArray[i * 2 + 1, j * 2] +
+                         cbArray[i * 2 + 1, j * 2 + 1]) / 4.0) - 128.0;
 
                     downsampledCr[i, j] =
-                        ((YCbCrData[i * 2, j * 2].Cr +
-                         YCbCrData[i * 2, j * 2 + 1].Cr +
-                         YCbCrData[i * 2 + 1, j * 2].Cr +
-                         YCbCrData[i * 2 + 1, j * 2 + 1].Cr) / 4.0) - 128.0;
+                        ((crArray[i * 2, j * 2] +
+                         crArray[i * 2, j * 2 + 1] +
+                         crArray[i * 2 + 1, j * 2] +
+                         crArray[i * 2 + 1, j * 2 + 1]) / 4.0) - 128.0;
                 }
             }
+            downsampledCb = ExtendArray(downsampledCb, downsampledHeight, extendedHeight, downsampledWidth, extendedWidth);
+            downsampledCr = ExtendArray(downsampledCr, downsampledHeight, extendedHeight, downsampledWidth, extendedWidth);
 
-            return (y, downsampledCb, downsampledCr);
+            return (resY, downsampledCb, downsampledCr);
+        }
+
+        private static double[,] ExtendArray(double[,] resArr, long currentHeight, long newHeight, long currentWidth, long newWidth)
+        {
+            for (var i = 0; i < currentHeight; i++)
+            {
+                for (var j = currentWidth; j < newWidth; j++)
+                    resArr[i, j] = resArr[i, currentWidth - 1];
+            }
+
+            for (var i = currentHeight; i < newHeight; i++)
+            {
+                for (var j = 0; j < newHeight; j++)
+                    resArr[i, j] = resArr[currentHeight - 1, j];
+            }
+            return resArr;
         }
 
         private static RGBPixel[] CreateOneDimPixelArray(byte[] bytes, long width, long height, int padding)
         {
-            var pixelsonedim = new RGBPixel[width * height];
+            var pixelsOneDim = new RGBPixel[width * height];
             var z = 0;
             var i = 0;
             var counter = 0;
@@ -310,30 +372,50 @@ namespace ProjektMgr
                     counter = 0;
                     continue;
                 }
-                pixelsonedim[z++] = new RGBPixel(bytes[i], bytes[i + 1], bytes[i + 2]);
+                pixelsOneDim[z++] = new RGBPixel(bytes[i], bytes[i + 1], bytes[i + 2]);
                 i += 3;
 
                 if (padding != 0)
                     counter += 3;
             }
-            return pixelsonedim;
+
+            return pixelsOneDim;
         }
 
-        private static YCbCr[,] CreateTwoDimYCbCrPixelArray(RGBPixel[] pixels, long width, long height)
-        {
-            var twoDimArray = new YCbCr[height, width];
-            var count = 0;
 
-            for (int i = 0; i < height; i++)
+        private static (double[,] Y, double[,] Cb, double[,] Cr) CreateTwoDimYCbCrArrays(byte[] bytes, long width, long height, int padding)
+        {
+            var YArray = new double[height, width];
+            var CbArray = new double[height, width];
+            var CrArray = new double[height, width];
+            var counter = 0;
+            byte r = 0, g = 0, b = 0;
+            var temp = 0;
+
+            for (var i = 0; i < height; i++)
             {
-                for (int j = 0; j < width; j++)
+                for (var j = 0; j < width; j++)
                 {
-                    var pixel = pixels[count];
-                    twoDimArray[i, j] = new YCbCr(pixel.R, pixel.G, pixel.B);
-                    count++;
+                    if (padding != 0 && counter != 0 && (counter / 3) % width == 0)
+                    {
+                        temp += padding;
+                        counter = 0;
+                        continue;
+                    }
+
+                    b = bytes[temp];
+                    g = bytes[temp + 1];
+                    r = bytes[temp + 2];
+                    YArray[i, j] = Math.Clamp(0.299 * r + 0.587 * g + 0.114 * b, 0, 255);
+                    CbArray[i, j] = Math.Clamp(-0.168736 * r - 0.331264 * g + 0.5 * b + 128, 0, 255);
+                    CrArray[i, j] = Math.Clamp(0.5 * r - 0.418688 * g - 0.081312 * b + 128, 0, 255);
+                    temp += 3;
+
+                    if (padding != 0)
+                        counter += 3;
                 }
             }
-            return twoDimArray;
+            return (YArray, CbArray, CrArray);
         }
 
         private static int[] ZigZagScan(double[,] block)
@@ -392,7 +474,15 @@ namespace ProjektMgr
             while (currentPos < decodedData.Count())
             {
                 var first64 = decodedData.GetRange(currentPos, blockShift).ToArray();
-                res.Add(CreateBlockFromZigZagData(first64));
+                var resBlock = new double[blockSize, blockSize];
+
+                for (int i = 0; i < blockSize * blockSize; i++)
+                {
+                    int x = CalculationArrays.ZigZagScan[i] / 8;
+                    int y = CalculationArrays.ZigZagScan[i] % 8;
+                    resBlock[x, y] = first64[i];
+                }
+                res.Add(resBlock);
                 currentPos += blockShift;
             }
             return res;
@@ -412,9 +502,25 @@ namespace ProjektMgr
             return res;
         }
 
-        private static string GenerateHuffmanEncodedDataString(List<double[,]> blocks, bool isY = false, bool isCr = false, bool isCb = false)
+        private static string GenerateHuffmanEncodedDataString(double[][,] blocks, bool isY = false, bool isCr = false, bool isCb = false)
         {
-            var zigZagData = EncodeAllBlocks(blocks);
+            //- 0.1 0.2s, po wyciagnieciu funkcji
+            var zigZagData = new int[8 * 8 * blocks.Count()];
+            var stopPoint = 0;
+
+            foreach (var block in blocks)
+            {
+                var blockToAdd = new int[64];
+                for (int i = 0; i < 64; i++)
+                {
+                    int x = CalculationArrays.ZigZagScan[i] / 8;
+                    int y = CalculationArrays.ZigZagScan[i] % 8;
+                    blockToAdd[i] = (int)block[x, y];
+                }
+                foreach (var value in blockToAdd)
+                    zigZagData[stopPoint++] = value;
+            }
+
             var frequency = GenerateFrequencyDictionary(zigZagData);
             var priorityQueue = HuffmanCoding.BuildPriorityQueue(frequency);
             var tree = HuffmanCoding.BuildHuffmanTree(priorityQueue);
@@ -440,13 +546,20 @@ namespace ProjektMgr
             return String.Join("", res);
         }
 
-        private static int[] EncodeAllBlocks(List<double[,]> blocks)
+        private static int[] EncodeAllBlocks(double[][,] blocks)
         {
             var res = new int[8 * 8 * blocks.Count()];
             var stopPoint = 0;
+
             foreach (var block in blocks)
             {
-                var blockToAdd = ZigZagScan(block);
+                var blockToAdd = new int[64];
+                for (int i = 0; i < 64; i++)
+                {
+                    int x = CalculationArrays.ZigZagScan[i] / 8;
+                    int y = CalculationArrays.ZigZagScan[i] % 8;
+                    blockToAdd[i] = (int)block[x, y];
+                }
                 foreach (var value in blockToAdd)
                     res[stopPoint++] = value;
             }
