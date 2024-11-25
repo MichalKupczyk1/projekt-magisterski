@@ -13,8 +13,6 @@ namespace ProjektMgr
 
         public static async Task<byte[]> CreateJFIFFile(byte[] bytes, long width, long height, int padding)
         {
-            Stopwatch sw = new Stopwatch();
-            sw.Start();
             var arrays = CreateTwoDimYCbCrArrays(bytes, width, height, padding);
             var downsampledData = ApplyDownsamplingAndExtendArrays(arrays.Y, arrays.Cb, arrays.Cr);
 
@@ -30,7 +28,6 @@ namespace ProjektMgr
             var encodedCb = GenerateHuffmanEncodedDataString(CbDCT, isCb: true);
             var encodedCr = GenerateHuffmanEncodedDataString(CrDCT, isCr: true);
 
-            Console.WriteLine("Encoding: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
             Console.WriteLine("File size after encoding: " + ((encodedY.Length + encodedCb.Length + encodedCr.Length) / 1000000.0).ToString("F2") + "mb");
 
             var decodedY = DecodeHuffmanData(encodedY, HuffmanCoding.YDataDictionary);
@@ -51,7 +48,6 @@ namespace ProjektMgr
 
             var rgb = YCbCrToRGB(height, width, MergedY, MergedCb, MergedCr);
             var result = PixelToByteArray(rgb);
-            Console.WriteLine("Decoding time: " + (sw.ElapsedMilliseconds / 1000.0).ToString() + "s");
 
             return result;
         }
@@ -95,7 +91,7 @@ namespace ProjektMgr
             return result;
         }
 
-        private static double[,] MergeBlocksInto2DArray(List<double[,]> blocks, long width, long height, bool isY = false)
+        private static double[,] MergeBlocksInto2DArray(double[][,] blocks, long width, long height, bool isY = false)
         {
             var res = new double[height, width];
             var counter = 0;
@@ -144,17 +140,60 @@ namespace ProjektMgr
             return res;
         }
 
-        private static async Task<List<double[,]>> ApplyIDCTAndDequantize(List<double[,]> blocks, bool isY = false)
+        private static async Task<double[][,]> ApplyIDCTAndDequantize(double[][,] blocks, bool isY = false)
         {
-            var tasks = blocks.Select((block, index) =>
-               Task.Run(() => new { Index = index, Block = ApplyIDCT(DequantizeBlock(block, isY)) }));
+            var threadsAvailable = Environment.ProcessorCount;
+            var chunkSize = (int)Math.Ceiling((double)blocks.Length / threadsAvailable);
 
-            var resList = await Task.WhenAll(tasks);
+            var results = new double[blocks.Length][,];
+            var tasks = new Task[threadsAvailable];
 
-            return resList.OrderBy(x => x.Index)
-                .Select(x => x.Block)
-                .ToList();
+            for (var thread = 0; thread < threadsAvailable; thread++)
+            {
+                var start = thread * chunkSize;
+                var end = Math.Min(start + chunkSize, blocks.Length);
+
+                tasks[thread] = Task.Run(() =>
+                {
+                    for (int i = start; i < end; i++)
+                    {
+                        var block = blocks[i];
+                        for (int x = 0; x < blockSize; x++)
+                            for (int y = 0; y < blockSize; y++)
+                                block[x, y] = isY ? block[x, y] * CalculationArrays.QuantizationYTable[x, y] : block[x, y] * CalculationArrays.QuantizationCbCrTable[x, y];
+
+                        var res = new double[blockSize, blockSize];
+                        var cos = new double[blockSize, blockSize];
+
+                        for (int u = 0; u < blockSize; u++)
+                            for (int x = 0; x < blockSize; x++)
+                                cos[u, x] = Math.Cos((Math.PI * (2.0 * x + 1.0) * u) / (2.0 * blockSize));
+
+                        for (int a = 0; a < blockSize; a++)
+                        {
+                            for (int b = 0; b < blockSize; b++)
+                            {
+                                var sum = 0.0;
+                                for (int x = 0; x < blockSize; x++)
+                                {
+                                    for (int y = 0; y < blockSize; y++)
+                                    {
+                                        var cu = x == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                                        var cv = y == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
+                                        sum += block[x, y] * cu * cv * cos[x, a] * cos[y, b];
+                                    }
+                                }
+                                res[a, b] = 0.25 * sum;
+                            }
+                        }
+                        results[i] = res;
+                    }
+                });
+            }
+            await Task.WhenAll(tasks);
+            return results;
         }
+
 
         private static double[,] ApplyIDCT(double[,] block)
         {
@@ -211,13 +250,10 @@ namespace ProjektMgr
 
                         var res = new double[blockSize, blockSize];
                         var cos = new double[blockSize, blockSize];
-                        var pi = Math.PI;
-                        var multipliedBlockSize = 2.0 * blockSize;
-                        var sum = 0.0;
 
                         for (int u = 0; u < blockSize; u++)
                             for (int x = 0; x < blockSize; x++)
-                                cos[u, x] = Math.Cos((pi * (2.0 * x + 1.0) * u) / multipliedBlockSize);
+                                cos[u, x] = Math.Cos((Math.PI * (2.0 * x + 1.0) * u) / (2.0 * blockSize));
 
                         for (int a = 0; a < blockSize; a++)
                         {
@@ -225,7 +261,7 @@ namespace ProjektMgr
                             {
                                 var cu = a == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
                                 var cv = b == 0 ? 1.0 / Math.Sqrt(2) : 1.0;
-                                sum = 0.0;
+                                var sum = 0.0;
 
                                 for (int x = 0; x < blockSize; x++)
                                     for (int y = 0; y < blockSize; y++)
@@ -465,9 +501,9 @@ namespace ProjektMgr
             return res;
         }
 
-        private static List<double[,]> DecodeZigZagDataIntoBlocks(List<int> decodedData)
+        private static double[][,] DecodeZigZagDataIntoBlocks(List<int> decodedData)
         {
-            var res = new List<double[,]>();
+            var resList = new List<double[,]>();
             var currentPos = 0;
             var blockShift = 64;
 
@@ -482,9 +518,16 @@ namespace ProjektMgr
                     int y = CalculationArrays.ZigZagScan[i] % 8;
                     resBlock[x, y] = first64[i];
                 }
-                res.Add(resBlock);
+                resList.Add(resBlock);
                 currentPos += blockShift;
             }
+
+            var res = new double[resList.Count()][,];
+            var counter = 0;
+
+            foreach (var resBlock in resList)
+                res[counter++] = resBlock;
+
             return res;
         }
 
